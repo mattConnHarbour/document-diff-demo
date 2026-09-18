@@ -1,7 +1,7 @@
 # Browser document comparison
 
 A standalone, product-shaped comparison workflow built against the published
-`superdoc@2.16.0` release. It compares an earlier DOCX to a revised DOCX through
+`superdoc@2.15.1` release. It compares an earlier DOCX to a revised DOCX through
 the worker-backed browser Document API, applies the result as tracked changes,
 and exports a review-preserving redline.
 
