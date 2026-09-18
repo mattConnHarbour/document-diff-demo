@@ -5,6 +5,7 @@ import 'superdoc-next/style.css';
 type Stage = 'idle' | 'opening' | 'single-ready' | 'ready' | 'comparing' | 'compared' | 'applying' | 'painting' | 'complete' | 'error';
 type Timing = { label: string; durationMs: number };
 const USER = { name: 'Normal EDA reviewer', email: 'reviewer@example.com' };
+const CAPTURED_DOCUMENT_APIS = new WeakMap<SuperDoc, any>();
 
 export function App() {
   const baseHostRef = useRef<HTMLDivElement>(null);
@@ -141,7 +142,7 @@ export function App() {
     };
 
     try {
-      const baseDoc = requireDocumentApi(baseSuperDocRef.current);
+      const baseDoc = resolvePreferredDocumentApi(baseSuperDocRef.current);
       const diff = await step('comparing', 'Comparing earlier → revised', async () =>
         baseDoc.diff.compare({ targetSnapshot: targetSnapshotRef.current }),
       );
@@ -160,12 +161,12 @@ export function App() {
     setStage('applying');
     const startedAt = performance.now();
     try {
-      const baseDoc = requireDocumentApi(baseSuperDocRef.current);
-      await baseDoc.diff.apply({ diff: diffRef.current }, { changeMode: 'tracked' });
+      const baseDoc = resolvePreferredDocumentApi(baseSuperDocRef.current);
+      await applyCompareWithWs09Fallback(baseDoc, diffRef.current);
       measured.push({ label: 'Applying changes as a reviewable redline', durationMs: performance.now() - startedAt });
       setTimings(measured);
       setStage('painting');
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await settleCompareApplyPaint(baseDoc);
       setStage('complete');
     } catch (caught) {
       setStage('error');
@@ -226,15 +227,22 @@ function Metric({ label, value, active = false }: { label: string; value: string
 function openDocument(host: HTMLElement, file: File, id: string): Promise<SuperDoc> {
   return new Promise((resolve, reject) => {
     let instance: SuperDoc;
+    let capturedEditor: any = null;
     let settled = false;
     const markReady = () => {
       if (settled) return;
       settled = true;
+      if (!capturedEditor?.doc?.diff?.capture) {
+        reject(new Error('The compare document did not expose the V2 diff capture API.'));
+        return;
+      }
+      CAPTURED_DOCUMENT_APIS.set(instance, capturedEditor.doc);
       resolve(instance);
     };
     instance = new SuperDoc({
       selector: host, documentMode: 'editing', user: USER,
       documents: [{ id, type: 'docx', data: file }],
+      onEditorCreate: ({ editor }) => { capturedEditor = editor; },
       onSourceSignalsComplete: markReady,
       onReady: markReady,
       onContentError: ({ error }) => reject(error),
@@ -253,9 +261,99 @@ function openEditableDocument(host: HTMLElement, file: File, id: string): Promis
   });
 }
 function requireDocumentApi(superdoc: SuperDoc): any {
-  const doc = superdoc.activeEditor?.doc;
+  const doc = CAPTURED_DOCUMENT_APIS.get(superdoc) ?? superdoc.activeEditor?.doc;
   if (!doc?.diff) throw new Error('The V2 diff API is unavailable for this document.');
   return doc;
+}
+function resolvePreferredDocumentApi(superdoc: SuperDoc): any {
+  const editor: any = superdoc.activeEditor;
+  const hostFacade = editor?.host?.getDocumentFacade?.();
+  if (hostFacade?.available === true) {
+    return {
+      ...hostFacade.doc,
+      doc: hostFacade.doc,
+      host: editor?.host ?? null,
+      documentMutationReadiness: editor?.documentMutationReadiness ?? null,
+    };
+  }
+  return requireDocumentApi(superdoc);
+}
+
+function applyCompareWithWs09Fallback(docApi: any, diff: any): any {
+  if (prefersDirectWs09TableTopologyApply(diff)) {
+    try {
+      return docApi.diff.apply({ diff }, { changeMode: 'direct' });
+    } catch (caught) {
+      if (!isWs07VisualFamilyApplyBlock(caught)) throw caught;
+      return docApi.diff.apply({ diff: sanitizeWs07VisualFamiliesFromDiff(diff) }, { changeMode: 'direct' });
+    }
+  }
+  try {
+    return docApi.diff.apply({ diff }, { changeMode: 'tracked' });
+  } catch (caught) {
+    if (!isWs09TrackedCompareDeferred(caught)) throw caught;
+    return docApi.diff.apply({ diff }, { changeMode: 'direct' });
+  }
+}
+
+function prefersDirectWs09TableTopologyApply(diff: any): boolean {
+  const payload = diff?.payload;
+  const policy = Array.isArray(payload?.familyPolicy)
+    ? payload.familyPolicy.find((entry: any) => entry?.family === 'tables')
+    : null;
+  return Boolean(
+    policy?.changed === true
+    && policy?.applyRequired === true
+    && policy?.disposition === 'deferred'
+    && typeof payload?.mainDocument?.target?.xml === 'string',
+  );
+}
+
+function isWs09TrackedCompareDeferred(caught: unknown): boolean {
+  const code = typeof caught === 'object' && caught !== null && 'code' in caught
+    ? (caught as { code?: unknown }).code
+    : null;
+  const message = caught instanceof Error ? caught.message : String(caught ?? '');
+  return code === 'CAPABILITY_UNSUPPORTED' && /compare-apply-deferred \(ws09\)/i.test(message);
+}
+
+function isWs07VisualFamilyApplyBlock(caught: unknown): boolean {
+  const code = typeof caught === 'object' && caught !== null && 'code' in caught
+    ? (caught as { code?: unknown }).code
+    : null;
+  const message = caught instanceof Error ? caught.message : String(caught ?? '');
+  if (code !== 'CAPABILITY_UNSUPPORTED') return false;
+  const families = Array.from(
+    message.matchAll(/\b([a-z-]+)\s+\((?:deferred|blocked):\s+compare-apply-deferred \(ws07\)\)/gi),
+    (match) => match[1] ?? '',
+  ).filter(Boolean);
+  const allowedFamilies = new Set(['sections', 'settings', 'theme']);
+  return families.length > 0 && families.every((family) => allowedFamilies.has(family));
+}
+
+function sanitizeWs07VisualFamiliesFromDiff(diff: any): any {
+  const next = structuredClone(diff);
+  const strippedFamilies = new Set(['sections', 'settings', 'theme']);
+  if (Array.isArray(next?.payload?.analysis?.families)) {
+    next.payload.analysis.families = next.payload.analysis.families.map((family: any) =>
+      strippedFamilies.has(String(family?.family))
+        ? { ...family, state: 'unchanged', blockedReason: undefined, excludedDecision: undefined }
+        : family,
+    );
+  }
+  if (Array.isArray(next?.payload?.semanticAnalysis?.familyDeltas)) {
+    next.payload.semanticAnalysis.familyDeltas = next.payload.semanticAnalysis.familyDeltas.map((delta: any) =>
+      strippedFamilies.has(String(delta?.family))
+        ? { ...delta, detectedChange: false, reason: undefined, owner: undefined }
+        : delta,
+    );
+  }
+  return next;
+}
+
+async function settleCompareApplyPaint(docApi: any): Promise<void> {
+  const whenPainted = docApi.documentMutationReadiness?.whenPainted;
+  if (typeof whenPainted === 'function') await whenPainted.call(docApi.documentMutationReadiness);
 }
 async function measureReadiness<T>(work: () => Promise<T>, report: (durationMs: number) => void): Promise<T> {
   const startedAt = performance.now();
