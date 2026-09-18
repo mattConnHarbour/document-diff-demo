@@ -229,24 +229,36 @@ function openDocument(host: HTMLElement, file: File, id: string): Promise<SuperD
     let instance: SuperDoc;
     let capturedEditor: any = null;
     let settled = false;
-    const markReady = () => {
+    let timeoutId = 0;
+    const finishWithError = (error: unknown) => {
       if (settled) return;
       settled = true;
+      window.clearTimeout(timeoutId);
+      reject(error);
+    };
+    timeoutId = window.setTimeout(
+      () => finishWithError(new Error('The compare document did not reach source-ready state within 15 seconds.')),
+      15_000,
+    );
+    const markReady = () => {
+      if (settled) return;
       if (!capturedEditor?.doc?.diff?.capture) {
-        reject(new Error('The compare document did not expose the V2 diff capture API.'));
+        finishWithError(new Error('The compare document did not expose the V2 diff capture API.'));
         return;
       }
+      settled = true;
+      window.clearTimeout(timeoutId);
       CAPTURED_DOCUMENT_APIS.set(instance, capturedEditor.doc);
       resolve(instance);
     };
     instance = new SuperDoc({
       selector: host, documentMode: 'editing', user: USER,
-      documents: [{ id, type: 'docx', data: file }],
+      document: { id, data: file },
       onEditorCreate: ({ editor }) => { capturedEditor = editor; },
       onSourceSignalsComplete: markReady,
-      onReady: markReady,
-      onContentError: ({ error }) => reject(error),
+      onContentError: ({ error }) => finishWithError(error),
     });
+    instance.on('exception', finishWithError);
   });
 }
 function openEditableDocument(host: HTMLElement, file: File, id: string): Promise<SuperDoc> {
