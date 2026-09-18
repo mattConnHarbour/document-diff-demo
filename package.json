@@ -1,0 +1,25 @@
+{
+  "name": "document-diff-demo",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@superdoc/docx-engine": "0.3.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "superdoc-next": "npm:superdoc@2.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.2.7"
+  }
+}
