@@ -10,10 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@superdoc/docx-engine": "0.14.1",
+    "@superdoc/docx-engine": "0.3.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "superdoc-next": "npm:superdoc@2.15.1"
+    "superdoc-next": "npm:superdoc@2.4.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.6",
